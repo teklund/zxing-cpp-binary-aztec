@@ -162,6 +162,146 @@ static int TotalBitsInLayer(int layers, bool compact)
 * @param userSpecifiedLayers if non-zero, a user-specified value for the number of layers
 * @return Aztec symbol matrix with metadata
 */
+
+EncodeResult
+Encoder::Encode_binary(const std::string& data, int minECCPercent, int userSpecifiedLayers)
+{
+	// High-level encode
+	BitArray bits = HighLevelEncoder::Encode_binary(data);
+
+	// stuff bits and choose symbol size
+	int eccBits = bits.size() * minECCPercent / 100 + 11;
+	int totalSizeBits = bits.size() + eccBits;
+	bool compact;
+	int layers;
+	int totalBitsInLayer;
+	int wordSize;
+	BitArray stuffedBits;
+	if (userSpecifiedLayers != DEFAULT_AZTEC_LAYERS) {
+		compact = userSpecifiedLayers < 0;
+		layers = std::abs(userSpecifiedLayers);
+		if (layers > (compact ? MAX_NB_BITS_COMPACT : MAX_NB_BITS)) {
+			throw std::invalid_argument("Illegal value for layers: " + std::to_string(userSpecifiedLayers));
+		}
+		totalBitsInLayer = TotalBitsInLayer(layers, compact);
+		wordSize = WORD_SIZE[layers];
+		int usableBitsInLayers = totalBitsInLayer - (totalBitsInLayer % wordSize);
+		StuffBits(bits, wordSize, stuffedBits);
+		if (stuffedBits.size() + eccBits > usableBitsInLayers) {
+			throw std::invalid_argument("Data to large for user specified layer");
+		}
+		if (compact && stuffedBits.size() > wordSize * 64) {
+			// Compact format only allows 64 data words, though C4 can hold more words than that
+			throw std::invalid_argument("Data to large for user specified layer");
+		}
+	}
+	else {
+		wordSize = 0;
+		// We look at the possible table sizes in the order Compact1, Compact2, Compact3,
+		// Compact4, Normal4,...  Normal(i) for i < 4 isn't typically used since Compact(i+1)
+		// is the same size, but has more data.
+		for (int i = 0; ; i++) {
+			if (i > MAX_NB_BITS) {
+				throw std::invalid_argument("Data too large for an Aztec code");
+			}
+			compact = i <= 3;
+			layers = compact ? i + 1 : i;
+			totalBitsInLayer = TotalBitsInLayer(layers, compact);
+			if (totalSizeBits > totalBitsInLayer) {
+				continue;
+			}
+			// [Re]stuff the bits if this is the first opportunity, or if the
+			// wordSize has changed
+			if (wordSize != WORD_SIZE[layers]) {
+				wordSize = WORD_SIZE[layers];
+				StuffBits(bits, wordSize, stuffedBits);
+			}
+			int usableBitsInLayers = totalBitsInLayer - (totalBitsInLayer % wordSize);
+			if (compact && stuffedBits.size() > wordSize * 64) {
+				// Compact format only allows 64 data words, though C4 can hold more words than that
+				continue;
+			}
+			if (stuffedBits.size() + eccBits <= usableBitsInLayers) {
+				break;
+			}
+		}
+	}
+	BitArray messageBits;
+	GenerateCheckWords(stuffedBits, totalBitsInLayer, wordSize, messageBits);
+
+	// generate mode message
+	int messageSizeInWords = stuffedBits.size() / wordSize;
+	BitArray modeMessage;
+	GenerateModeMessage(compact, layers, messageSizeInWords, modeMessage);
+
+	// allocate symbol
+	int baseMatrixSize = (compact ? 11 : 14) + layers * 4; // not including alignment lines
+	std::vector<int> alignmentMap(baseMatrixSize, 0);
+	int matrixSize;
+	if (compact) {
+		// no alignment marks in compact mode, alignmentMap is a no-op
+		matrixSize = baseMatrixSize;
+		std::iota(alignmentMap.begin(), alignmentMap.end(), 0);
+	}
+	else {
+		matrixSize = baseMatrixSize + 1 + 2 * ((baseMatrixSize / 2 - 1) / 15);
+		int origCenter = baseMatrixSize / 2;
+		int center = matrixSize / 2;
+		for (int i = 0; i < origCenter; i++) {
+			int newOffset = i + i / 15;
+			alignmentMap[origCenter - i - 1] = center - newOffset - 1;
+			alignmentMap[origCenter + i] = center + newOffset + 1;
+		}
+	}
+
+	EncodeResult output{compact, matrixSize, layers, messageSizeInWords, BitMatrix(matrixSize)};
+
+	BitMatrix& matrix = output.matrix;
+
+	// draw data bits
+	for (int i = 0, rowOffset = 0; i < layers; i++) {
+		int rowSize = (layers - i) * 4 + (compact ? 9 : 12);
+		for (int j = 0; j < rowSize; j++) {
+			int columnOffset = j * 2;
+			for (int k = 0; k < 2; k++) {
+				if (messageBits.get(rowOffset + columnOffset + k)) {
+					matrix.set(alignmentMap[i * 2 + k], alignmentMap[i * 2 + j]);
+				}
+				if (messageBits.get(rowOffset + rowSize * 2 + columnOffset + k)) {
+					matrix.set(alignmentMap[i * 2 + j], alignmentMap[baseMatrixSize - 1 - i * 2 - k]);
+				}
+				if (messageBits.get(rowOffset + rowSize * 4 + columnOffset + k)) {
+					matrix.set(alignmentMap[baseMatrixSize - 1 - i * 2 - k], alignmentMap[baseMatrixSize - 1 - i * 2 - j]);
+				}
+				if (messageBits.get(rowOffset + rowSize * 6 + columnOffset + k)) {
+					matrix.set(alignmentMap[baseMatrixSize - 1 - i * 2 - j], alignmentMap[i * 2 + k]);
+				}
+			}
+		}
+		rowOffset += rowSize * 8;
+	}
+
+	// draw mode message
+	DrawModeMessage(matrix, compact, matrixSize, modeMessage);
+
+	// draw alignment marks
+	if (compact) {
+		DrawBullsEye(matrix, matrixSize / 2, 5);
+	}
+	else {
+		DrawBullsEye(matrix, matrixSize / 2, 7);
+		for (int i = 0, j = 0; i < baseMatrixSize / 2 - 1; i += 15, j += 16) {
+			for (int k = (matrixSize / 2) & 1; k < matrixSize; k += 2) {
+				matrix.set(matrixSize / 2 - j, k);
+				matrix.set(matrixSize / 2 + j, k);
+				matrix.set(k, matrixSize / 2 - j);
+				matrix.set(k, matrixSize / 2 + j);
+			}
+		}
+	}
+	return output;
+}
+
 EncodeResult
 Encoder::Encode(const std::string& data, int minECCPercent, int userSpecifiedLayers)
 {

@@ -29,6 +29,7 @@ namespace Aztec {
 class HighLevelEncoder
 {
 public:
+    static BitArray Encode_binary(const std::string& text);
 	static BitArray Encode(const std::string& text);
 };
 

@@ -17,6 +17,7 @@ namespace Aztec {
 class Token
 {
 public:
+    void appendTo_binary(BitArray& bitArray, std::byte* text) const;
 	void appendTo(BitArray& bitArray, const std::string& text) const;
 
 	static Token CreateSimple(int value, int bitCount) {

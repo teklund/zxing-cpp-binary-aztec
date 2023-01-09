@@ -79,6 +79,12 @@ public:
 			_bits.push_back((value >> (numBits-1)) & 1);
 	}
 
+	void appendBits_binary(std::byte value, int numBits)
+	{
+		for (; numBits; --numBits)
+			_bits.push_back(((uint8_t)value >> (numBits-1)) & 1);
+	}
+
 	void appendBit(bool bit) { _bits.push_back(bit); }
 
 	void appendBitArray(const BitArray& other) { _bits.insert(_bits.end(), other.begin(), other.end()); }

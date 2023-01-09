@@ -216,6 +216,21 @@ static bool IsBetterThanOrEqualTo(const EncodingState& state, const EncodingStat
 	return newModeBitCount <= other.bitCount;
 }
 
+static BitArray ToBitArray_binary(const EncodingState& state, std::byte* text, int textLength)
+{
+	auto endState = EndBinaryShift(state, textLength);
+	BitArray bits;
+	// Add each token to the result.
+	int counter=0;
+	for (const Token& symbol : endState.tokens) {
+		symbol.appendTo_binary(bits, text);
+		counter++;
+	}
+
+	//assert bitArray.getSize() == this.bitCount;
+	return bits;
+}
+
 static BitArray ToBitArray(const EncodingState& state, const std::string& text)
 {
 	auto endState = EndBinaryShift(state, Size(text));
@@ -338,6 +353,109 @@ static std::list<EncodingState> UpdateStateListForChar(const std::list<EncodingS
 		UpdateStateForChar(state, text, index, result);
 	}
 	return result.size() > 1 ? SimplifyStates(result) : result;
+}
+
+static void UpdateStateForChar_binary(const EncodingState& state, std::byte* text, int index, std::list<EncodingState>& result)
+{
+	int ch = (uint8_t)text[index] & 0xff;
+	bool charInCurrentTable = CHAR_MAP[state.mode][ch] > 0;
+	EncodingState stateNoBinary;
+	bool firstTime = true;
+	for (int mode = 0; mode <= MODE_PUNCT; mode++) {
+		int charInMode = CHAR_MAP[mode][ch];
+		if (charInMode > 0) {
+			if (firstTime) {
+				// Only create stateNoBinary the first time it's required.
+				stateNoBinary = EndBinaryShift(state, index);
+				firstTime = false;
+			}
+			// Try generating the character by latching to its mode
+			if (!charInCurrentTable || mode == state.mode || mode == MODE_DIGIT) {
+				// If the character is in the current table, we don't want to latch to
+				// any other mode except possibly digit (which uses only 4 bits).  Any
+				// other latch would be equally successful *after* this character, and
+				// so wouldn't save any bits.
+				result.push_back(LatchAndAppend(stateNoBinary, mode, charInMode));
+			}
+			// Try generating the character by switching to its mode.
+			if (!charInCurrentTable && SHIFT_TABLE[state.mode][mode] >= 0) {
+				// It never makes sense to temporarily shift to another mode if the
+				// character exists in the current mode.  That can never save bits.
+				result.push_back(ShiftAndAppend(stateNoBinary, mode, charInMode));
+			}
+		}
+	}
+	if (state.binaryShiftByteCount > 0 || CHAR_MAP[state.mode][ch] == 0) {
+		// It's never worthwhile to go into binary shift mode if you're not already
+		// in binary shift mode, and the character exists in your current mode.
+		// That can never save bits over just outputting the char in the current mode.
+		result.push_back(AddBinaryShiftChar(state, index));
+	}
+}
+
+static std::list<EncodingState> UpdateStateList_binary(const std::list<EncodingState>& states, std::byte* text, int index)
+{
+	std::list<EncodingState> result;
+	for (auto& state : states) {
+		UpdateStateForChar_binary(state, text, index, result);
+	}
+
+	return result.size() > 1 ? SimplifyStates(result) : result;
+}
+
+std::byte* to_binary(const std::string& string, int stringLength, int* byteLength)
+{
+    std::vector<std::byte> bytes;
+    std::string number = "";
+	std::string printout = "";
+	
+	for(int i = 0; i < stringLength; i++) {
+		unsigned char currentChar = string[i];
+      	if(currentChar == '0' || currentChar == '1' || currentChar == '2' || 
+		   currentChar == '3' || currentChar == '4' || currentChar == '5' || 
+		   currentChar == '6' || currentChar == '7' ||
+		   currentChar == '8' || currentChar == '9' ) {
+			number += currentChar;
+		}
+	    else if(number.size() != 0){
+           bytes.push_back(std::byte((uint8_t)atoi(number.c_str())));
+		   number = "";
+		}
+	}
+         
+   *byteLength = bytes.size();
+   std::byte* result = (std::byte*)malloc(sizeof(std::byte)*bytes.size());
+
+   for(int i = 0; i < (int) bytes.size(); i++) {
+      result[i] = bytes.at(i);
+   }
+
+   return result;
+}
+ 
+/**
+* @return text represented by this encoder encoded as a {@link BitArray}
+*/
+BitArray
+HighLevelEncoder::Encode_binary(const std::string& text)
+{	
+	int bytesLength = 0;
+    std::byte* inbytes = to_binary(text, Size(text), &bytesLength);
+    std::list<EncodingState> states;
+	
+	states.push_back(EncodingState{ std::vector<Token>(), MODE_UPPER, 0, 0 });
+	
+	for (int index = 0; index < bytesLength; index++) {
+		std::byte nextChar = index + 1 < bytesLength? inbytes[index + 1] : std::byte(0);
+		
+		states = UpdateStateList_binary(states, inbytes, index);
+	}
+
+	// We are left with a set of states.  Find the shortest one.
+	EncodingState minState = *std::min_element(states.begin(), states.end(), [](const EncodingState& a, const EncodingState& b) { return a.bitCount < b.bitCount; });
+	// Convert it to a bit array, and return.
+
+	return ToBitArray_binary(minState, std::move(inbytes), bytesLength);
 }
 
 /**
